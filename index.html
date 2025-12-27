@@ -215,7 +215,7 @@
                     }
                     //If the SIGHASH_SINGLE flag is set, apply the following additional modifications
                     if ( sigflag === "03" || sigflag === "83" ) {
-                        //--- If the current input number is greater than the number of outputs, the resulting digest is "0".repeat( 62 ) + "01";
+                        //--- If the current input number is greater than the number of outputs, the resulting digest is "01" + "0".repeat( 62 );
                         if ( input_num >= bitcoinjs.Transaction.fromHex( txhex ).outs.length ) return "01" + "0".repeat( 62 );
                         //--- Otherwise, for every output index j, where j does not equal the current output number, set amount to 0xffffffffffffffff (8-byte little-endian, interpreted as -1), and set scriptPubKey to empty (length 0),
                         var i; for ( i=0; i<txcopy.num_of_outputs[ 0 ]; i++ ) {
