@@ -12,6 +12,7 @@
             var cleanup_crew = {
                 waiting: false,
                 network: "regtest",
+                in_progress: null,
                 waitSomeTime: num => new Promise( resolve => setTimeout( resolve, num ) ),
                 wait: async () => {
                     cleanup_crew.waiting = true;
@@ -175,6 +176,7 @@
                 getLegacySighash: ( txhex, prev_tx, input_num, sigflag, redeem_script ) => {
                     var parseTransactions = cleanup_crew.parseTransactions;
                     //Create a copy of the transaction (txCopy)
+                    var original = parseTransactions( 1, txhex )[ 0 ];
                     var txcopy = parseTransactions( 1, txhex )[ 0 ];
                     //For all inputs in txCopy, set the scriptSig to empty (length 0)
                     var i; for ( i=0; i<txcopy.number_of_inputs[ 0 ]; i++ ) {
@@ -196,7 +198,9 @@
                     //TODO: Remove all remaining OP_CODESEPARATOR opcodes
                     //TODO: Apply FindAndDelete: delete any occurrences of the current signature (exact byte match, excluding the sighash byte suffix) from the current scriptsig
                     //If the ANYONECANPAY flag is set, apply the following additional modifications
+                    var anyone_can_pay_is_set = false;
                     if ( sigflag === "81" || sigflag === "82" || sigflag === "83" ) {
+                        anyone_can_pay_is_set = true;
                         //--- Set the input vector to contain only the current input
                         var current_input = JSON.parse( JSON.stringify( txcopy[ `input_${input_num}` ] ) );
                         var i; for ( i=0; i<txcopy.number_of_inputs[ 0 ]; i++ ) delete txcopy[ `input_${i}` ];
@@ -210,32 +214,39 @@
                         txcopy.num_of_outputs = [ 0, "00" ];
                         //--- For all inputs except the current one, set nSequence to 0
                         var current_sequence = txcopy[ `input_${input_num}` ].sequence;
-                        var i; for ( i=0; i<txcopy.number_of_inputs[ 0 ]; i++ ) txcopy[ `input_${i}` ].sequence = "00000000";
+                        var i; for ( i=0; i<original.number_of_inputs[ 0 ]; i++ ) {
+                            if ( !txcopy.hasOwnProperty( `input_${i}` ) ) continue;
+                            txcopy[ `input_${i}` ].sequence = "00000000";
+                        }
                         txcopy[ `input_${input_num}` ].sequence = current_sequence;
                     }
                     //If the SIGHASH_SINGLE flag is set, apply the following additional modifications
+                    var sighash_single_is_set = false;
                     if ( sigflag === "03" || sigflag === "83" ) {
+                        sighash_single_is_set = true;
                         //--- If the current input number is greater than the number of outputs, the resulting digest is "01" + "0".repeat( 62 );
                         if ( input_num >= bitcoinjs.Transaction.fromHex( txhex ).outs.length ) return "01" + "0".repeat( 62 );
                         //--- Otherwise, for every output index j, where j does not equal the current output number, set amount to 0xffffffffffffffff (8-byte little-endian, interpreted as -1), and set scriptPubKey to empty (length 0),
                         var i; for ( i=0; i<txcopy.num_of_outputs[ 0 ]; i++ ) {
                             if ( i !== input_num ) {
                                 txcopy[ `output_${i}` ].value = "ffffffffffffffff";
+                                txcopy[ `output_${i}` ].length_of_scriptPubKey = [ 0, "00" ];
                                 txcopy[ `output_${i}` ].scriptPubKey = "";
                             }
                         }
-                        //--- ...and resize the output vector to the current input number plus 1...
-                        if ( txcopy.num_of_outputs[ 0 ] > input_num + 1 ) {
-                            var i; for ( i=0; i<txcopy.num_of_outputs[ 0 ]; i++ ) {
-                                if ( i > input_num + 1 ) delete txcopy[ `output_${i}` ];
-                                var num_of_outputs_as_hex = ( input_num + 1 ).toString( 16 );
-                                if ( num_of_outputs_as_hex.length % 2 ) num_of_outputs_as_hex = "0" + num_of_outputs_as_hex;
-                                txcopy.num_of_outputs = [ input_num + 1, num_of_outputs_as_hex ];
-                            }
+                        //--- ...and set the number of outputs to the current input number plus 1...
+                        var i; for ( i=0; i<txcopy.num_of_outputs[ 0 ]; i++ ) {
+                            if ( i > input_num + 1 ) delete txcopy[ `output_${i}` ];
                         }
+                        var num_of_outputs_as_hex = ( input_num + 1 ).toString( 16 );
+                        if ( num_of_outputs_as_hex.length % 2 ) num_of_outputs_as_hex = "0" + num_of_outputs_as_hex;
+                        txcopy.num_of_outputs = [ input_num + 1, num_of_outputs_as_hex ];
                         //--- ...and, for all inputs except the current one, set nSequence to 0
                         var current_sequence = txcopy[ `input_${input_num}` ].sequence;
-                        var i; for ( i=0; i<txcopy.number_of_inputs[ 0 ]; i++ ) txcopy[ `input_${i}` ].sequence = "00000000";
+                        var i; for ( i=0; i<original.number_of_inputs[ 0 ]; i++ ) {
+                            if ( !txcopy.hasOwnProperty( `input_${i}` ) ) continue;
+                            txcopy[ `input_${i}` ].sequence = "00000000";
+                        }
                         txcopy[ `input_${input_num}` ].sequence = current_sequence;
                     }
                     //Now it is time to serlialize the preimage, so create an empty string
@@ -246,7 +257,8 @@
                     //Append a VarInt (number of inputs)
                     preimage += parsed_tx.number_of_inputs[ 1 ];
                     //For each input:
-                    var i; for ( i=0; i<parsed_tx.number_of_inputs[ 0 ]; i++ ) {
+                    var i; for ( i=0; i<original.number_of_inputs[ 0 ]; i++ ) {
+                        if ( anyone_can_pay_is_set && i !== input_num ) continue;
                         //--- Append a 32 byte prevout hash
                         preimage += parsed_tx[ `input_${i}` ].txid;
                         //--- Append a 4 byte prevout index (little-endian)
@@ -261,7 +273,8 @@
                     //Append the VarInt (number of outputs)
                     preimage += parsed_tx.num_of_outputs[ 1 ];
                     //For each output:
-                    var i; for ( i=0; i<parsed_tx.num_of_outputs[ 0 ]; i++ ) {
+                    var i; for ( i=0; i<original.num_of_outputs[ 0 ]; i++ ) {
+                        if ( sighash_single_is_set && i > input_num ) continue;
                         //--- Append an 8 byte amount (little-endian)
                         preimage += parsed_tx[ `output_${i}` ].value;
                         //--- Append a VarInt (scriptPubKey length)
@@ -285,15 +298,16 @@
                     var address = address_data.address;
                     return [ address, keypair ];
                 },
-                prepareCovenant: ( network, extra_pubkey, invert_checksig ) => {
-                    //note that 300602010102010103 hashes to 0f639fd6fac821bba3eedf60674b25467e945a51
-                    var covenant_script = [ "OP_DUP", "OP_RIPEMD160", "0f639fd6fac821bba3eedf60674b25467e945a51", "OP_EQUALVERIFY", "03784b6ebe47edcb0b81092d016c054a4375f9d0b73ca68afdf6c97614c83b83df", "OP_CHECKSIG" ];
-                    if ( extra_pubkey ) covenant_script.unshift( extra_pubkey, "OP_CHECKSIGVERIFY" );
-                    if ( invert_checksig ) covenant_script.push( "OP_NOT" );
-                    var script = bitcoinjs.script.fromASM( covenant_script.join( " " ) );
+                prepareRestriction: ( network, extra_pubkey, use_gtx ) => {
+                    //for an ftx restriction we expect the stack to contain one element, namely, the signature 300602010102010183, which we duplicate, hash, and compare its hash to 32a8efa32f198f21b58d98919a25b0cbcb428d49; if this commitment is satisfied, we know the user provided the right signature, because that's the hash of the above-mentioned signature. However, the original signature was consumed by the hash function, so to check the signature's validity, we check its duplicate that we made in the first step, and check it against a pubkey which we know that signature validates for if and only if the sighash is 0x0100...0000 -- meaning there is no output at this index. The required pubkey (0378...83df) was generated using public key recovery to find out what public key that signature validates for when the message (i.e. the sighash) is 0x0100...0000.
+                    var restriction_script = [ "OP_DUP", "OP_RIPEMD160", "32a8efa32f198f21b58d98919a25b0cbcb428d49", "OP_EQUALVERIFY", "03784b6ebe47edcb0b81092d016c054a4375f9d0b73ca68afdf6c97614c83b83df", "OP_CHECKSIG" ];
+                    //for a gtx restriction we expect the stack to contain two elements: a public key generated by the user in a manner to be described shortly followed by the signature 300602010102010183. As before, we duplicate the signature and check it against a hash to ensure it is the one we expect. However, we cannot simply check the signature's validity and ensure it's false, because bitcoin's standard mempool policy rules do not allow invalid signatures to be anything but an empty string, and our signature is not that. So, instead, we check the signature against the public key supplied by the user. But currently it is at the back of the stack, with the duplicate of the signature in front of it, so we run OP_SWAP to put them in the right order. Next we duplicate the user's public key and push the duplicate to the altstack, for use later. Then we run OP_CHECKSIGVERIFY, forcing the signature to validate. How does the user get a public key that the signature validates for? The same way we did: by using public key recovery to find out what public key the signature validates for when the message is the sighash for this input. Having ascertained that the signature -- which uses sighash_single | acp -- is valid, we now know one of two things is true: either there is an output at this index -- which is what we want, per the terms of the gtx restriction -- or the sighash for this input is 0x0100...0000. To eliminate the second possiblity, we bring back the duplicate of the user's pubkey from the altstack, compare it with the public key we know represents the sighash 0x0100...0000, and ensure they are not the same (using OP_EQUAL OP_NOT). If they ARE the same, then the user's public key was the one representing the sighash 0x0100...0000, meaning there was no output at this index. That is not what we want, BUT, since their public key matched the one we compared it to, the only item left on the stack is OP_FALSE, so the script is invalid. If, by contrast, the public keys are NOT the same, then the user's public key was NOT the one representing the sighash 0x0100...0000, meaning there IS an output at this index. That is what we want, and since their public key did NOT match the one we compared it to, the only item left on the stack is OP_TRUE, so the script is valid.
+                    if ( use_gtx ) restriction_script = [ "OP_DUP", "OP_RIPEMD160", "32a8efa32f198f21b58d98919a25b0cbcb428d49", "OP_EQUALVERIFY", "OP_SWAP", "OP_DUP", "OP_TOALTSTACK", "OP_CHECKSIGVERIFY", "OP_FROMALTSTACK", "03784b6ebe47edcb0b81092d016c054a4375f9d0b73ca68afdf6c97614c83b83df", "OP_EQUAL", "OP_NOT" ];
+                    if ( extra_pubkey ) restriction_script.unshift( extra_pubkey, "OP_CHECKSIGVERIFY" );
+                    var script = bitcoinjs.script.fromASM( restriction_script.join( " " ) );
                     var scripthash = bitcoinjs.crypto.hash160( script ).toHex();
-                    var covenant_address = bitcoinjs.address.fromOutputScript( Buffer.from( "a914" + scripthash + "87", "hex" ), bitcoinjs.networks[ network ] );
-                    return [ covenant_address, covenant_script ];
+                    var restriction_address = bitcoinjs.address.fromOutputScript( Buffer.from( "a914" + scripthash + "87", "hex" ), bitcoinjs.networks[ network ] );
+                    return [ restriction_address, restriction_script ];
                 },
                 prepareTx: ( network, inputs, outputs ) => {
                     var psbt = new bitcoinjs.Psbt({ network: bitcoinjs.networks[ network ] });
@@ -318,11 +332,12 @@
                     });
                     return psbt.data.globalMap.unsignedTx.toBuffer().toString( "hex" );
                 },
-                demoFOICovenant: async network => {
+                demoFTXRestriction: async network => {
+                    cleanup_crew.in_progress = "ftx";
                     //Display initial instructions
                     $( '.instructions' ).innerHTML = `
-                        <p>In this demo, we will create a very basic covenant called an FOI covenant, which stands for "Fewer Outputs than Inputs."</p>
-                        <p>The covenant will consist of an anyone_can_spend bitcoin address with one restriction: its script will inspect the number of outputs and inputs in any transaction that tries to spend money that enters that address, and the script will fail unless the number of outputs is smaller than the number of inputs.</p>
+                        <p>In this demo, we will create a basic restriction called an FTX restriction, which stands for "Fewer Than X."</p>
+                        <p>The restriction will consist of an anyone_can_spend bitcoin address with one limitation: its script will inspect the number of outputs and inputs in any transaction that tries to spend money that enters that address, and the script will fail unless the number of outputs is fewer than the number of inputs.</p>
                         <p>Click ok when you are ready.</p>
                         <p><button class="continue">ok</button></p>
                     `;
@@ -331,20 +346,20 @@
                     //Wait til user clicks ok
                     $( '.continue' ).onclick = () => cleanup_crew.waiting = false;
                     await cleanup_crew.wait();
+                    if ( cleanup_crew.in_progress !== "ftx" ) return;
 
-                    //Prepare the covenant
-                    var [ covenant_address, covenant_script ] = cleanup_crew.prepareCovenant( network );
-                    var covenant_scriptsig = "09300602010102010103";
-                    var final_redeem_script = bitcoinjs.script.fromASM( covenant_script.join( " " ) ).toHex();
-                    var final_scriptsig = covenant_scriptsig + bitcoinjs.script.fromASM( final_redeem_script ).toHex();
+                    //Prepare ftx restriction
+                    var [ restriction_address, restriction_script ] = cleanup_crew.prepareRestriction( network );
+                    var restriction_scriptsig = "09300602010102010183";
+                    var final_redeem_script = bitcoinjs.script.fromASM( restriction_script.join( " " ) ).toHex();
+                    var final_scriptsig = restriction_scriptsig + bitcoinjs.script.fromASM( final_redeem_script ).toHex();
 
-                    //Display the covenant address
+                    //Display the restriction address
                     $( '.instructions' ).innerHTML = `
-                        <p>Here is the covenant address:</p>
-                        <p>${covenant_address}</p>
-                        <p>It is an anyone_can_spend address, with one restriction: the script requires the transaction's output count to be smaller than its input count. That is a restriction on the outputs, and thus a very basic covenant.</p>
-                        <p>To prove this, let us fund it and try to spend the money in a transaction *without* fewer inputs than outputs, just to see it fail, i.e. just to see the script enforce the covenant.</p>
-                        <p>Fund the address with 10k sats on ${network} (this will become a second input to our transaction, thus making it valid) and click ok when you are done.</p>
+                        <p>Here is the restriction address:</p>
+                        <p>${restriction_address}</p>
+                        <p>It is an anyone_can_spend address whose script contains an FTX restriction requiring the output count to be "fewer than" a certain number, namely, the input count. To prove that the script enforces that restriction, let us fund it and try to spend the money in a transaction *without* fewer outputs than inputs, just to see it fail, i.e. just to see the script enforce the restriction.</p>
+                        <p>Fund the address with 10k sats on ${network} and click ok when you are done.</p>
                         <p><button class="continue">ok</button></p>
                     `;
                     window.scrollTo( 0, 0 );
@@ -352,42 +367,43 @@
                     //Wait til user clicks ok
                     $( '.continue' ).onclick = () => cleanup_crew.waiting = false;
                     await cleanup_crew.wait();
+                    if ( cleanup_crew.in_progress !== "ftx" ) return;
 
                     //Get the funding transaction data
-                    var covenant_funding_txhex = prompt( `enter the hex of the funding transaction` );
-                    var tx = bitcoinjs.Transaction.fromHex( covenant_funding_txhex );
-                    var covenant_txinfo = {
+                    var restriction_funding_txhex = prompt( `enter the hex of the funding transaction` );
+                    var tx = bitcoinjs.Transaction.fromHex( restriction_funding_txhex );
+                    var restriction_txinfo = {
                         txid: tx.getId(),
                     }
                     tx.outs.forEach( ( output, index ) => {
                         var calculated_address = bitcoinjs.address.fromOutputScript( output.script, bitcoinjs.networks[ network ] );
-                        if ( calculated_address !== covenant_address ) return;
-                        covenant_txinfo.vout = index;
-                        covenant_txinfo.amnt = output.value;
+                        if ( calculated_address !== restriction_address ) return;
+                        restriction_txinfo.vout = index;
+                        restriction_txinfo.amnt = output.value;
                     });
 
                     //Get a destination address
-                    var destino = prompt( `Enter an address where you want the covenant-encumbered sats to go\n\nIf you don't have one handy, a test address has been provided`, 'n3qUi7LfcVyXaZQULJxnVFAsmpWKedpC65' );
+                    var destino = prompt( `Enter an address where you want the restriction-encumbered sats to go\n\nIf you don't have one handy, a test address has been provided`, 'n3qUi7LfcVyXaZQULJxnVFAsmpWKedpC65' );
 
                     //Prepare an invalid transaction
                     var inputs = [{
-                        txid: covenant_txinfo.txid,
-                        vout: covenant_txinfo.vout,
+                        txid: restriction_txinfo.txid,
+                        vout: restriction_txinfo.vout,
                     }];
                     var outputs = [{
                         address: destino,
-                        value: covenant_txinfo.amnt - 500,
+                        value: restriction_txinfo.amnt - 500,
                     }];
                     var invalid_txhex = cleanup_crew.prepareTx( network, inputs, outputs );
                     var invalid_tx = bitcoinjs.Transaction.fromHex( invalid_txhex );
 
-                    //Add the covenant's scriptsig
+                    //Add the restriction's scriptsig
                     var invalid_scriptsig = final_scriptsig;
                     invalid_tx.ins[ 0 ].script = Buffer.from( invalid_scriptsig, "hex" );
 
                     //Display the now-signed invalid transaction
                     $( '.instructions' ).innerHTML = `
-                        <p>Try (and fail) to broadcast this transaction, which has 1 input and 1 output. It *would* be valid if not for the covenant in the redeem script, which requires *fewer* outputs than inputs.</p>
+                        <p>Try (and fail) to broadcast this transaction, which has 1 input and 1 output. It *would* be valid if not for the restriction in the redeem script, which requires *fewer* outputs than inputs.</p>
                         <p>${invalid_tx.toHex()}</p>
                         <p>Broadcast the transaction on ${network} and click ok when it inevitably fails with an error.</p>
                         <p><button class="continue">ok</button></p>
@@ -397,6 +413,7 @@
                     //Wait til user clicks ok
                     $( '.continue' ).onclick = () => cleanup_crew.waiting = false;
                     await cleanup_crew.wait();
+                    if ( cleanup_crew.in_progress !== "ftx" ) return;
 
                     //Create a legacy address
                     var [ address, keypair ] = cleanup_crew.getLegacyAddress( network );
@@ -404,8 +421,8 @@
 
                     //Display instructions
                     $( '.instructions' ).innerHTML = `
-                        <p>Now we will create a *valid* spending transaction, by adding one extra input, so that the transaction has fewer outputs than inputs, thus satisfying the covenant</p>
-                        <p>Here is a "normal" bitcoin address -- send it 10k sats on ${network} and click ok when you are done.</p>
+                        <p>Now we will create a *valid* spending transaction, by adding one extra input, so that the transaction has fewer outputs than inputs, thus satisfying the restriction</p>
+                        <p>Here is a "normal" bitcoin address -- send it 10k sats on ${network} (this will become a second input to our transaction, thus making it valid) and click ok when you are done.</p>
                         <p>${address}</p>
                         <p><button class="continue">ok</button></p>
                     `;
@@ -414,6 +431,7 @@
                     //Wait til user clicks ok
                     $( '.continue' ).onclick = () => cleanup_crew.waiting = false;
                     await cleanup_crew.wait();
+                    if ( cleanup_crew.in_progress !== "ftx" ) return;
 
                     //Get the funding transaction data
                     var normal_funding_txhex = prompt( `enter the hex of the second funding transaction (i.e. the one you just created` );
@@ -434,13 +452,13 @@
                     var amnt0 = normal_txinfo.amnt;
                     var thex0 = normal_funding_txhex;
 
-                    //Prepare the covenant's funding info
-                    var txid1 = covenant_txinfo.txid;
-                    var vout1 = covenant_txinfo.vout;
-                    var amnt1 = covenant_txinfo.amnt;
-                    var thex1 = covenant_funding_txhex;
+                    //Prepare the restriction's funding info
+                    var txid1 = restriction_txinfo.txid;
+                    var vout1 = restriction_txinfo.vout;
+                    var amnt1 = restriction_txinfo.amnt;
+                    var thex1 = restriction_funding_txhex;
 
-                    //Create unsigned covenant tx
+                    //Create unsigned restriction tx
                     var inputs = [{
                         txid: txid0,
                         vout: vout0,
@@ -468,7 +486,7 @@
                     var scriptsig0 = ( sig0.length / 2 ).toString( 16 ) + sig0 + "21" + pubkey;
                     tx.ins[ 0 ].script = Buffer.from( scriptsig0, "hex" );
 
-                    //Add the covenant's scriptsig
+                    //Add the restriction's scriptsig
                     var scriptsig1 = final_scriptsig;
                     tx.ins[ 1 ].script = Buffer.from( scriptsig1, "hex" );
 
@@ -476,17 +494,17 @@
                     $( '.instructions' ).innerHTML = `
                         <p>Broadcast this transaction:</p>
                         <p>${tx.toHex()}</p>
-                        <p>Voila! You created a bitcoin address that enforced a basic fewer-outputs-than-inputs covenant on bitcoin, with no soft fork required!</p>
+                        <p>Voila! You created a bitcoin address that enforced a basic FTX restriction on bitcoin</p>
                     `;
                     window.scrollTo( 0, 0 );
+                    cleanup_crew.in_progress = null;
                 },
-                demoCleanupCovenant: async network => {
+                demoGTXRestriction: async network => {
+                    cleanup_crew.in_progress = "gtx";
                     //Display initial instructions
                     $( '.instructions' ).innerHTML = `
-                        <p>In this demo, we will create an advanced covenant called a cleanup covenant, designed to automatically pay people who consume many outputs from the utxo set.</p>
-                        <p>The covenant will consist of a bitcoin address with two restrictions: in any transaction that tries to spend money locked to this address, the number of outputs must be smaller than the number of inputs, and it must have a signature from an extra pubkey too.</p>
-                        <p>Then we will publish an anyone_can_pay signature for that extra pubkey that specifies all the outputs, but not the inputs. Specifically, it will require 98 unspendable op_return outputs and 1 spendable "bounty address" that is truly anyone_can_spend. We expect someone to come along and take the bounty for himself or herself.</p>
-                        <p>Once we fund the covenant and publish the signature, anyone can take the money from the covenant and use it to fund (and then sweep) the bounty address, but only if their transaction consumes 100+ inputs from the utxo set and creates 1 spendable output (which is the bounty itself).</p>
+                        <p>In this demo, we will create a restriction called a GTX restriction, which stands for "Greater Than X."</p>
+                        <p>The restriction will consist of an anyone_can_spend bitcoin address with one limitation: its script will inspect whether the input being spent has an output at the same index number, and fail if not. This effectively requires the number of outputs to be "greater than" a certain number, namely, the index number of the input containing the restriction, minus one.</p>
                         <p>Click ok when you are ready.</p>
                         <p><button class="continue">ok</button></p>
                     `;
@@ -495,23 +513,19 @@
                     //Wait til user clicks ok
                     $( '.continue' ).onclick = () => cleanup_crew.waiting = false;
                     await cleanup_crew.wait();
+                    if ( cleanup_crew.in_progress !== "gtx" ) return;
 
-                    //Prepare the covenant
-                    var extra_privkey = bitcoinjs.ECPair.makeRandom().__D;
-                    var extra_keypair = bitcoinjs.ECPair.fromPrivateKey( extra_privkey );
-                    var extra_pubkey = extra_keypair.publicKey.toString( "hex" );
-                    var [ covenant_address, covenant_script ] = cleanup_crew.prepareCovenant( network, extra_pubkey );
-                    var covenant_scriptsig = "09300602010102010103";
-                    var final_redeem_script = bitcoinjs.script.fromASM( covenant_script.join( " " ) ).toHex();
+                    //Prepare gtx restriction
+                    var extra_pubkey = null;
+                    var use_gtx = true;
+                    var [ restriction_address, restriction_script ] = cleanup_crew.prepareRestriction( network, extra_pubkey, use_gtx );
 
-                    //Display the covenant address
+                    //Display the restriction address
                     $( '.instructions' ).innerHTML = `
-                        <p>Here is the covenant address:</p>
-                        <p>${covenant_address}</p>
-                        <p>It will be an anyone_can_spend address as soon as we publish the anyone_can_pay signature, which we will do after we fund the covenant. The anyone_can_pay signature will require anyone who wants to use it to create 99 outputs -- only 1 of them will end up in the utxo set, the others are op_returns. But users can't simply spend the money by creating the right set of outputs -- the *covenant* requires the number of outputs to be *fewer* than the number of inputs, which means no spend transaction using the ACP signature is valid unless it consumes 100+ inputs. So this covenant will pay people to clean up the utxo set. It's a cleanup covenant.</p>
-                        <p>To illustrate how it works, let us fund it and try to spend the money in a transaction with *only one* input, just to see it fail, i.e. just to see the script enforce the covenant.</p>
-                        <p>Fund the address with 10k sats on ${network} (this will become a second input to our transaction, thus making it valid) and click ok when you are done. Here is the covenant address again:</p>
-                        <p>${covenant_address}</p>
+                        <p>Here is the restriction address:</p>
+                        <p>${restriction_address}</p>
+                        <p>It is an anyone_can_spend address whose script contains a GTX restriction requiring the output count to be "greater than" a certain number, namely, the input count minus one. To prove that the script enforces that restriction, let us fund it and try to spend the money in a transaction whose output count is *not* greater than that number, just to see it fail, i.e. just to see the script enforce the restriction.</p>
+                        <p>Fund the address with 10k sats on ${network} and click ok when you are done.</p>
                         <p><button class="continue">ok</button></p>
                     `;
                     window.scrollTo( 0, 0 );
@@ -519,18 +533,220 @@
                     //Wait til user clicks ok
                     $( '.continue' ).onclick = () => cleanup_crew.waiting = false;
                     await cleanup_crew.wait();
+                    if ( cleanup_crew.in_progress !== "gtx" ) return;
 
                     //Get the funding transaction data
-                    var covenant_funding_txhex = prompt( `enter the hex of the funding transaction` );
-                    var tx = bitcoinjs.Transaction.fromHex( covenant_funding_txhex );
-                    var covenant_txinfo = {
+                    var restriction_funding_txhex = prompt( `enter the hex of the funding transaction` );
+                    var tx = bitcoinjs.Transaction.fromHex( restriction_funding_txhex );
+                    var restriction_txinfo = {
                         txid: tx.getId(),
                     }
                     tx.outs.forEach( ( output, index ) => {
                         var calculated_address = bitcoinjs.address.fromOutputScript( output.script, bitcoinjs.networks[ network ] );
-                        if ( calculated_address !== covenant_address ) return;
-                        covenant_txinfo.vout = index;
-                        covenant_txinfo.amnt = output.value;
+                        if ( calculated_address !== restriction_address ) return;
+                        restriction_txinfo.vout = index;
+                        restriction_txinfo.amnt = output.value;
+                    });
+
+                    //Get a destination address
+                    var destino = prompt( `Enter an address where you want the restriction-encumbered sats to go\n\nIf you don't have one handy, a test address has been provided`, 'n3qUi7LfcVyXaZQULJxnVFAsmpWKedpC65' );
+
+                    //Create a legacy address
+                    var [ address, keypair ] = cleanup_crew.getLegacyAddress( network );
+                    var pubkey = keypair.publicKey.toString( "hex" );
+
+                    //Display the normal address
+                    $( '.instructions' ).innerHTML = `
+                        <p>Now we have to create an extra input</p>
+                        <p>Right now we can create a transaction with 1 input (the address you funded a couple steps ago) and one output (the address you entered one step ago). But such a transaction *would* satisfy the restriction: the restriction would be on input 1, thus requiring an output count greater than 1 minus 1, i.e. an output count greater than 0, which is satisfied by the fact that there is a destination address. To "fix" this (and ensure the restriction is *not* satisfied, so we can see the transaction fail), you must now fund a *normal* bitcoin address. Then we will add it as a second input to our transaction, and place the restriction on input 2 instead of input 1. That will require the transaction to have 2 outputs instead of 1. But there will only be 1 output this time around, so it will fail, thus proving that the restriction is enforced.</p>
+                        <p>Here is the "normal address":</p>
+                        <p>${address}</p>
+                        <p>Fund the address with 10k sats on ${network} and click ok when you are done.</p>
+                        <p><button class="continue">ok</button></p>
+                    `;
+                    window.scrollTo( 0, 0 );
+
+                    //Wait til user clicks ok
+                    $( '.continue' ).onclick = () => cleanup_crew.waiting = false;
+                    await cleanup_crew.wait();
+                    if ( cleanup_crew.in_progress !== "gtx" ) return;
+
+                    //Get the funding transaction data
+                    var normal_funding_txhex = prompt( `enter the hex of the second funding transaction (i.e. the one you just created` );
+                    var tx = bitcoinjs.Transaction.fromHex( normal_funding_txhex );
+                    var normal_txinfo = {
+                        txid: tx.getId(),
+                    }
+                    tx.outs.forEach( ( output, index ) => {
+                        var calculated_address = bitcoinjs.address.fromOutputScript( output.script, bitcoinjs.networks[ network ] );
+                        if ( calculated_address !== address ) return;
+                        normal_txinfo.vout = index;
+                        normal_txinfo.amnt = output.value;
+                    });
+
+                    //Prepare a valid transaction
+                    var inputs = [{
+                        txid: normal_txinfo.txid,
+                        vout: normal_txinfo.vout,
+                    },{
+                        txid: restriction_txinfo.txid,
+                        vout: restriction_txinfo.vout,
+                    }];
+                    var outputs = [{
+                        address: destino,
+                        value: normal_txinfo.amnt + restriction_txinfo.amnt - 500,
+                    },{
+                        script: bitcoinjs.script.fromASM( 'OP_RETURN' ),
+                        value: 0,
+                    }];
+                    var txhex = cleanup_crew.prepareTx( network, inputs, outputs );
+                    var tx = bitcoinjs.Transaction.fromHex( txhex );
+
+                    //Prepare an invalid transaction
+                    outputs.pop();
+                    var invalid_txhex = cleanup_crew.prepareTx( network, inputs, outputs );
+                    var invalid_tx = bitcoinjs.Transaction.fromHex( invalid_txhex );
+
+                    //Sign the first input of the invalid tx
+                    var prev_tx = normal_funding_txhex;
+                    var input_num = 0;
+                    var sigflag = "83";
+                    var sighash0 = cleanup_crew.getLegacySighash( invalid_txhex, prev_tx, input_num, sigflag );
+                    var sig0 = keypair.sign( Buffer.from( sighash0, "hex" ), true );
+                    var sigflag0 = 3 | 128;
+                    sig0 = bitcoinjs.script.signature.encode( sig0, sigflag0 ).toString( "hex" );
+
+                    //Add the first input's scriptsig to the invalid tx
+                    var scriptsig0 = ( sig0.length / 2 ).toString( 16 ) + sig0 + "21" + pubkey;
+                    invalid_tx.ins[ 0 ].script = Buffer.from( scriptsig0, "hex" );
+
+                    //Add the restriction's scriptsig to the invalid tx
+                    var prev_tx = restriction_funding_txhex;
+                    var input_num = 1;
+                    var final_redeem_script = bitcoinjs.script.fromASM( restriction_script.join( " " ) ).toHex();
+                    var sighash1 = cleanup_crew.getLegacySighash( invalid_txhex, prev_tx, input_num, sigflag, final_redeem_script );
+                    var recovered_pubkey = nobleSecp256k1.recoverPublicKey( sighash1, "3006020101020101", 1 );
+                    recovered_pubkey = nobleSecp256k1.Point.fromHex( recovered_pubkey ).toHex( true );
+                    var restriction_scriptsig = `21${recovered_pubkey}09300602010102010183`;
+                    var final_scriptsig = restriction_scriptsig + bitcoinjs.script.fromASM( final_redeem_script ).toHex();
+                    var invalid_scriptsig = final_scriptsig;
+                    invalid_tx.ins[ 1 ].script = Buffer.from( invalid_scriptsig, "hex" );
+
+                    //Display the now-signed invalid transaction
+                    $( '.instructions' ).innerHTML = `
+                        <p>Try (and fail) to broadcast this transaction, which has 2 inputs and 1 output. It *would* be valid if not for the restriction in the redeem script, which requires an output count *greater than* the index of the input with the restriction minus 1 -- and, as we placed the restriction at index 2, in its current position, the transaction requires an output count greater than 1, which it does not have.</p>
+                        <p>${invalid_tx.toHex()}</p>
+                        <p>Broadcast the transaction on ${network} and click ok when it inevitably fails with an error.</p>
+                        <p><button class="continue">ok</button></p>
+                    `;
+                    window.scrollTo( 0, 0 );
+
+                    //Wait til user clicks ok
+                    $( '.continue' ).onclick = () => cleanup_crew.waiting = false;
+                    await cleanup_crew.wait();
+                    if ( cleanup_crew.in_progress !== "gtx" ) return;
+
+                    //Display information about the next step
+                    $( '.instructions' ).innerHTML = `
+                        <p>Now we will create a valid transaction</p>
+                        <p>The only thing we will do is slightly modify our previous transaction: we will add one extra output, which is an op_return with 0 value. That will satisfy the restriction by making the number of outputs greater than 1, which is what the previous transaction required (and hence the new one too).</p>
+                        <p>Click ok to continue.</p>
+                        <p><button class="continue">ok</button></p>
+                    `;
+                    window.scrollTo( 0, 0 );
+
+                    //Wait til user clicks ok
+                    $( '.continue' ).onclick = () => cleanup_crew.waiting = false;
+                    await cleanup_crew.wait();
+                    if ( cleanup_crew.in_progress !== "gtx" ) return;
+
+                    //Sign the first input of the valid tx (its sighash is different from the invalid tx's sighash due to having an extra output -- this is true even though it uses sighash_single, because sighash_single commits to the total output *count* even though it only commits to one actual *output* -- so by adding an extra output, we changed what it commits to, and thus the sighash changed)
+                    var prev_tx = normal_funding_txhex;
+                    var input_num = 0;
+                    var sigflag = "83";
+                    var sighash0 = cleanup_crew.getLegacySighash( txhex, prev_tx, input_num, sigflag );
+                    var sig0 = keypair.sign( Buffer.from( sighash0, "hex" ), true );
+                    var sigflag0 = 3 | 128;
+                    sig0 = bitcoinjs.script.signature.encode( sig0, sigflag0 ).toString( "hex" );
+
+                    //Add the first input's scriptsig to the valid tx
+                    var scriptsig0 = ( sig0.length / 2 ).toString( 16 ) + sig0 + "21" + pubkey;
+                    tx.ins[ 0 ].script = Buffer.from( scriptsig0, "hex" );
+
+                    //Add the restriction's scriptsig to the invalid tx
+                    var prev_tx = restriction_funding_txhex;
+                    var input_num = 1;
+                    var sighash1 = cleanup_crew.getLegacySighash( txhex, prev_tx, input_num, sigflag, final_redeem_script );
+                    var recovered_pubkey = nobleSecp256k1.recoverPublicKey( sighash1, "3006020101020101", 1 );
+                    recovered_pubkey = nobleSecp256k1.Point.fromHex( recovered_pubkey ).toHex( true );
+                    var restriction_scriptsig = `21${recovered_pubkey}09300602010102010183`;
+                    var final_scriptsig = restriction_scriptsig + bitcoinjs.script.fromASM( final_redeem_script ).toHex();
+                    var valid_scriptsig = final_scriptsig;
+                    tx.ins[ 1 ].script = Buffer.from( valid_scriptsig, "hex" );
+
+                    //Display the now-signed transaction
+                    $( '.instructions' ).innerHTML = `
+                        <p>Broadcast this transaction:</p>
+                        <p>${tx.toHex()}</p>
+                        <p>Voila! You created a bitcoin address that enforced a GTX restriction on bitcoin</p>
+                    `;
+                    window.scrollTo( 0, 0 );
+                    cleanup_crew.in_progress = null;
+                },
+                demoCleanupRestriction: async network => {
+                    cleanup_crew.in_progress = "cleanup";
+                    //Display initial instructions
+                    $( '.instructions' ).innerHTML = `
+                        <p>In this demo, we will create an advanced restriction called a cleanup restriction, designed to automatically pay people who consume many outputs from the utxo set.</p>
+                        <p>The restriction will consist of a bitcoin address with two limitations: in any transaction that tries to spend money locked to this address, the number of outputs must be smaller than the number of inputs, and it must have a signature from an extra pubkey too.</p>
+                        <p>Then we will publish an anyone_can_pay signature for that extra pubkey that specifies all the outputs, but not the inputs. Specifically, it will require 98 unspendable op_return outputs and 1 spendable "bounty address" that is truly anyone_can_spend. We expect someone to come along and take the bounty for himself or herself.</p>
+                        <p>Once we fund the restriction and publish the signature, anyone can take the money from the restriction and use it to fund (and then sweep) the bounty address, but only if their transaction consumes 100+ inputs from the utxo set and creates 1 spendable output (which is the bounty itself).</p>
+                        <p>Click ok when you are ready.</p>
+                        <p><button class="continue">ok</button></p>
+                    `;
+                    window.scrollTo( 0, 0 );
+
+                    //Wait til user clicks ok
+                    $( '.continue' ).onclick = () => cleanup_crew.waiting = false;
+                    await cleanup_crew.wait();
+                    if ( cleanup_crew.in_progress !== "cleanup" ) return;
+
+                    //Prepare the restriction
+                    var extra_privkey = bitcoinjs.ECPair.makeRandom().__D;
+                    var extra_keypair = bitcoinjs.ECPair.fromPrivateKey( extra_privkey );
+                    var extra_pubkey = extra_keypair.publicKey.toString( "hex" );
+                    var [ restriction_address, restriction_script ] = cleanup_crew.prepareRestriction( network, extra_pubkey );
+                    var restriction_scriptsig = "09300602010102010183";
+                    var final_redeem_script = bitcoinjs.script.fromASM( restriction_script.join( " " ) ).toHex();
+
+                    //Display the restriction address
+                    $( '.instructions' ).innerHTML = `
+                        <p>Here is the restriction address:</p>
+                        <p>${restriction_address}</p>
+                        <p>It will be an anyone_can_spend address as soon as we publish the anyone_can_pay signature, which we will do after we fund the restriction. The anyone_can_pay signature will require anyone who wants to use it to create 99 outputs -- only 1 of them will end up in the utxo set, the others are op_returns. But users can't simply spend the money by creating the right set of outputs -- the *restriction* requires the number of outputs to be *fewer* than the number of inputs, which means no spend transaction using the ACP signature is valid unless it consumes 100+ inputs. So this restriction will pay people to clean up the utxo set. It's a cleanup restriction.</p>
+                        <p>To illustrate how it works, let us fund it and try to spend the money in a transaction with *only one* input, just to see it fail, i.e. just to see the script enforce the restriction.</p>
+                        <p>Fund the address with 10k sats on ${network} (this will become a second input to our transaction, thus making it valid) and click ok when you are done. Here is the restriction address again:</p>
+                        <p>${restriction_address}</p>
+                        <p><button class="continue">ok</button></p>
+                    `;
+                    window.scrollTo( 0, 0 );
+
+                    //Wait til user clicks ok
+                    $( '.continue' ).onclick = () => cleanup_crew.waiting = false;
+                    await cleanup_crew.wait();
+                    if ( cleanup_crew.in_progress !== "cleanup" ) return;
+
+                    //Get the funding transaction data
+                    var restriction_funding_txhex = prompt( `enter the hex of the funding transaction` );
+                    var tx = bitcoinjs.Transaction.fromHex( restriction_funding_txhex );
+                    var restriction_txinfo = {
+                        txid: tx.getId(),
+                    }
+                    tx.outs.forEach( ( output, index ) => {
+                        var calculated_address = bitcoinjs.address.fromOutputScript( output.script, bitcoinjs.networks[ network ] );
+                        if ( calculated_address !== restriction_address ) return;
+                        restriction_txinfo.vout = index;
+                        restriction_txinfo.amnt = output.value;
                     });
 
                     //Prepare an anyone_can_spend address
@@ -541,12 +757,12 @@
 
                     //Prepare a tx with that acs_address as an output plus 99 op_returns, so you can make the ACP sig
                     var inputs = [{
-                        txid: covenant_txinfo.txid,
-                        vout: covenant_txinfo.vout,
+                        txid: restriction_txinfo.txid,
+                        vout: restriction_txinfo.vout,
                     }];
                     var required_outputs = [{
                         address: acs_address,
-                        value: covenant_txinfo.amnt - 5_000,
+                        value: restriction_txinfo.amnt - 5_000,
                     }];
                     var i; for ( i=0; i<98; i++ ) required_outputs.push({
                         script: bitcoinjs.script.fromASM( 'OP_RETURN' ),
@@ -555,7 +771,7 @@
                     var acp_txhex = cleanup_crew.prepareTx( network, inputs, required_outputs );
 
                     //Make the ACP sig
-                    var prev_tx = covenant_funding_txhex;
+                    var prev_tx = restriction_funding_txhex;
                     var input_num = 0;
                     var sigflag = "81";
                     var redeem_script = final_redeem_script;
@@ -573,7 +789,7 @@
 
                     //Display instructions about creating 99 utxos
                     $( '.instructions' ).innerHTML = `
-                        <p>The covenant will require us to consume 100+ utxos as inputs. However, 100 utxos do not necessarily exist yet on your regtest network. In fact, this app only knows 1 utxo that definitely exists: the one locked to the covenant address. So now we will make 99 more, so that a transaction we'll create later can consume them.</p>
+                        <p>The restriction will require us to consume 100+ utxos as inputs. However, 100 utxos do not necessarily exist yet on your regtest network. In fact, this app only knows 1 utxo that definitely exists: the one locked to the restriction address. So now we will make 99 more, so that a transaction we'll create later can consume them.</p>
                         <p>Fund the address below with 56,785 sats on ${network}. That is 99 * 540 + 3,325. The 99 is for the 99 utxos, each of which will be funded with 540 sats, which is the dust limit for the types of addresses we're going to create. The extra 3,325 will pay for mining fees.</p>
                         <p>${ninety_nine_output_maker}</p>
                         <p><button class="continue">ok</button></p>
@@ -583,6 +799,7 @@
                     //Wait til user clicks ok
                     $( '.continue' ).onclick = () => cleanup_crew.waiting = false;
                     await cleanup_crew.wait();
+                    if ( cleanup_crew.in_progress !== "cleanup" ) return;
 
                     //Get the funding transaction data
                     var nn_funding_txhex = prompt( `enter the hex of the funding transaction` );
@@ -630,7 +847,7 @@
                     $( '.instructions' ).innerHTML = `
                         <p>Broadcast this transaction:</p>
                         <p>${nn_tx.toHex()}</p>
-                        <p>Now there are 100 outputs for us to consume later -- 99 that we just created plus the 1 in the covenant address. Our next step is to create a transaction that tries to spend the covenant-encumbered sats, but it will only consume 99 total utxos, not the 100+ required by the covenant. This transaction will be invalid, but we will try it anyway, just to see it fail, i.e. just to see the script enforce the covenant.</p>
+                        <p>Now there are 100 outputs for us to consume later -- 99 that we just created plus the 1 in the restriction address. Our next step is to create a transaction that tries to spend the restriction-encumbered sats, but it will only consume 99 total utxos, not the 100+ required by the restriction. This transaction will be invalid, but we will try it anyway, just to see it fail, i.e. just to see the script enforce the restriction.</p>
                         <p>Click ok to continue.</p>
                         <p><button class="continue">ok</button></p>
                     `;
@@ -639,14 +856,15 @@
                     //Wait til user clicks ok
                     $( '.continue' ).onclick = () => cleanup_crew.waiting = false;
                     await cleanup_crew.wait();
+                    if ( cleanup_crew.in_progress !== "cleanup" ) return;
 
                     //Get a destination address
-                    var destino = prompt( `Enter an address where you want the covenant-encumbered sats to go\n\nIf you don't have one handy, a test address has been provided`, 'n3qUi7LfcVyXaZQULJxnVFAsmpWKedpC65' );
+                    var destino = prompt( `Enter an address where you want the restriction-encumbered sats to go\n\nIf you don't have one handy, a test address has been provided`, 'n3qUi7LfcVyXaZQULJxnVFAsmpWKedpC65' );
 
                     //Prepare an invalid transaction
                     var inputs = [{
-                        txid: covenant_txinfo.txid,
-                        vout: covenant_txinfo.vout,
+                        txid: restriction_txinfo.txid,
+                        vout: restriction_txinfo.vout,
                     }];
                     var i; for ( i=98; i>0; i-- ) {
                         inputs.unshift({
@@ -657,8 +875,8 @@
                     var invalid_txhex = cleanup_crew.prepareTx( network, inputs, required_outputs );
                     var invalid_tx = bitcoinjs.Transaction.fromHex( invalid_txhex );
 
-                    //Add the covenant's scriptsig
-                    var invalid_scriptsig = covenant_scriptsig + length_of_acp_sig_in_hex + acp_sig + bitcoinjs.script.fromASM( final_redeem_script ).toHex();
+                    //Add the restriction's scriptsig
+                    var invalid_scriptsig = restriction_scriptsig + length_of_acp_sig_in_hex + acp_sig + bitcoinjs.script.fromASM( final_redeem_script ).toHex();
                     invalid_tx.ins[ invalid_tx.ins.length - 1 ].script = Buffer.from( invalid_scriptsig, "hex" );
 
                     //Add a scriptsig for every other input
@@ -666,7 +884,7 @@
 
                     //Display the now-signed invalid transaction
                     $( '.instructions' ).innerHTML = `
-                        <p>Try (and fail) to broadcast this transaction, which has 99 inputs and 99 outputs. It *would* be valid if not for the covenant in the redeem script, which requires 100+ inputs because the ACP sig requires 99 outputs.</p>
+                        <p>Try (and fail) to broadcast this transaction, which has 99 inputs and 99 outputs. It *would* be valid if not for the restriction in the redeem script, which requires 100+ inputs because the ACP sig requires 99 outputs.</p>
                         <p>${invalid_tx.toHex()}</p>
                         <p>Broadcast the transaction on ${network} and click ok when it inevitably fails with an error.</p>
                         <p><button class="continue">ok</button></p>
@@ -676,10 +894,11 @@
                     //Wait til user clicks ok
                     $( '.continue' ).onclick = () => cleanup_crew.waiting = false;
                     await cleanup_crew.wait();
+                    if ( cleanup_crew.in_progress !== "cleanup" ) return;
 
                     //Display instructions
                     $( '.instructions' ).innerHTML = `
-                        <p>Now we will create a *valid* spending transaction, by consuming all 100 inputs we've created rather than only 99 of them -- then the transaction will have fewer outputs than inputs, thus satisfying the covenant.</p>
+                        <p>Now we will create a *valid* spending transaction, by consuming all 100 inputs we've created rather than only 99 of them -- then the transaction will have fewer outputs than inputs, thus satisfying the restriction.</p>
                         <p>Click ok to continue.</p>
                         <p><button class="continue">ok</button></p>
                     `;
@@ -688,8 +907,9 @@
                     //Wait til user clicks ok
                     $( '.continue' ).onclick = () => cleanup_crew.waiting = false;
                     await cleanup_crew.wait();
+                    if ( cleanup_crew.in_progress !== "cleanup" ) return;
 
-                    //Create unsigned covenant tx
+                    //Create unsigned restriction tx
                     inputs.unshift({
                         txid: nn_txid,
                         vout: 0,
@@ -697,8 +917,8 @@
                     var txhex = cleanup_crew.prepareTx( network, inputs, required_outputs );
                     var tx = bitcoinjs.Transaction.fromHex( txhex );
 
-                    //Add the covenant's scriptsig
-                    var final_scriptsig = covenant_scriptsig + length_of_acp_sig_in_hex + acp_sig + bitcoinjs.script.fromASM( final_redeem_script ).toHex();
+                    //Add the restriction's scriptsig
+                    var final_scriptsig = restriction_scriptsig + length_of_acp_sig_in_hex + acp_sig + bitcoinjs.script.fromASM( final_redeem_script ).toHex();
                     tx.ins[ tx.ins.length - 1 ].script = Buffer.from( final_scriptsig, "hex" );
 
                     //Add a scriptsig for every other input
@@ -708,9 +928,10 @@
                     $( '.instructions' ).innerHTML = `
                         <p>Broadcast this transaction:</p>
                         <p>${tx.toHex()}</p>
-                        <p>Voila! You created a bitcoin address that enforced a cleanup covenant -- an address that anyone can spend from with its anyone_can_pay signature, but only in a transaction that consumes 100+ inputs and creates only 1 spendable output.</p>
+                        <p>Voila! You created a bitcoin address that enforced a cleanup restriction -- an address that anyone can spend from with its anyone_can_pay signature, but only in a transaction that consumes 100+ inputs and creates only 1 spendable output.</p>
                     `;
                     window.scrollTo( 0, 0 );
+                    cleanup_crew.in_progress = null;
                 },
             }
         </script>
@@ -754,6 +975,9 @@
             .instructions_div * {
                 font-family: monospace;
             }
+            .restriction_button {
+                margin: .5rem 0;
+            }
             @media screen and (max-width: 600px) {
             }
         </style>
@@ -775,21 +999,25 @@
     </head>
     <body>
         <h1>Cleanup Crew</h1>
-        <p><button class="foi_covenant">Basic covenant</button> <button class="cleanup_covenant">Cleanup covenant</button></p>
+        <p><button class="restriction_button ftx_restriction">FTX restriction</button> <button class="restriction_button gtx_restriction">GTX restriction</button> <button class="restriction_button cleanup_restriction">Cleanup restriction</button></p>
         <div class="instructions_div">
             <p>Instructions:</p>
             <div class="instructions">
-                <p>Pick a covenant to demo -- further instructions will appear here</p>
+                <p>Pick a restriction to demo -- further instructions will appear here</p>
             </div>
         </div>
         <script>
-            $( '.foi_covenant' ).onclick = async () => {
+            $( '.ftx_restriction' ).onclick = async () => {
                 var network = cleanup_crew.network;
-                cleanup_crew.demoFOICovenant( network );
+                cleanup_crew.demoFTXRestriction( network );
             }
-            $( '.cleanup_covenant' ).onclick = async () => {
+            $( '.gtx_restriction' ).onclick = async () => {
                 var network = cleanup_crew.network;
-                cleanup_crew.demoCleanupCovenant( network );
+                cleanup_crew.demoGTXRestriction( network );
+            }
+            $( '.cleanup_restriction' ).onclick = async () => {
+                var network = cleanup_crew.network;
+                cleanup_crew.demoCleanupRestriction( network );
             }
         </script>
     </body>
